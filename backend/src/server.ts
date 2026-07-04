@@ -1,16 +1,26 @@
+import { env } from './config/env.js';
 import { buildApp } from './app.js';
+import { ensureBucket } from './lib/storage.js';
 
-const PORT = Number(process.env.PORT ?? 3000);
-const HOST = process.env.HOST ?? '0.0.0.0'; // 0.0.0.0 is required inside Docker
+const PORT = env.PORT;
+const HOST = env.HOST; // 0.0.0.0 is required inside Docker
 
 async function start(): Promise<void> {
-  const isDev = process.env.NODE_ENV !== 'production';
+  const isDev = env.NODE_ENV !== 'production';
 
   const app = await buildApp({
     logger: isDev
       ? { transport: { target: 'pino-pretty' } }
       : true,
   });
+
+  // Ensure the object-storage bucket exists before accepting traffic.
+  try {
+    await ensureBucket();
+  } catch (err) {
+    app.log.error({ err }, 'Failed to ensure storage bucket exists');
+    process.exit(1);
+  }
 
   try {
     await app.listen({ port: PORT, host: HOST });

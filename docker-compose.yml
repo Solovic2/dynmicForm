@@ -1,35 +1,95 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dynamicform
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dynamicform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - appnet
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000" # S3 API (also used by browser via presigned URLs)
+      - "9001:9001" # web console
+    networks:
+      - appnet
+
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     environment:
-      NODE_ENV: production
-      PORT: "3000"
+      NODE_ENV: development
+      PORT: "8000"
       HOST: 0.0.0.0
-      CORS_ORIGIN: http://localhost:8080
+      CORS_ORIGIN: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/dynamicform?schema=public
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change-me-access-secret}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-me-refresh-secret}
+      ACCESS_TOKEN_TTL: 1h
+      REFRESH_TOKEN_TTL: 7d
+      # Backend reaches MinIO by service name; the browser reaches it on localhost.
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: uploads
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_FORCE_PATH_STYLE: "true"
+      MAX_UPLOAD_BYTES: "10485760"
+    # Apply pending migrations, then run the TypeScript source via tsx (Dockerfile.dev).
+    command: sh -c "npx prisma migrate deploy && npm run dev"
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
     ports:
-      - "3000:3000"
+      - "8000:8000"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     networks:
       - appnet
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
+    environment:
+      # On the compose network the backend is the "backend" service, not localhost.
+      # Without this the Vite proxy defaults to localhost:8000 (the frontend
+      # container's own localhost) and every /api call fails with ECONNREFUSED.
+      VITE_PROXY_TARGET: http://backend:8000
     ports:
-      - "8080:80"
+      - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
     networks:
       - appnet
+
+volumes:
+  db-data:
+  minio-data:
 
 networks:
   appnet:
