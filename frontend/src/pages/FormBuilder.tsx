@@ -290,26 +290,28 @@ export function FormBuilder(): JSX.Element {
           const gridFields = SETTINGS_FIELDS[q.type].filter((f) => !f.inline);
           return (
             <div key={q.key} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-              <div className="flex items-center gap-2">
-                <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-medium text-gray-500">
+              <div className="flex items-start gap-2">
+                <span className="mt-2 grid h-6 w-6 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-medium text-gray-500">
                   {i + 1}
                 </span>
-                <input
-                  className={inputClass}
-                  placeholder="Question label"
-                  maxLength={500}
-                  value={q.label}
-                  onChange={(e) => patchQuestion(q.key, { label: e.target.value })}
-                />
-                <Dropdown<QuestionType>
-                  className="w-44 shrink-0"
-                  value={q.type}
-                  options={(Object.keys(typeLabels) as QuestionType[]).map((t) => ({
-                    value: t,
-                    label: typeLabels[t],
-                  }))}
-                  onChange={(type) => changeType(q.key, type)}
-                />
+                <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+                  <input
+                    className={inputClass}
+                    placeholder="Question label"
+                    maxLength={500}
+                    value={q.label}
+                    onChange={(e) => patchQuestion(q.key, { label: e.target.value })}
+                  />
+                  <Dropdown<QuestionType>
+                    className="w-full shrink-0 sm:w-44"
+                    value={q.type}
+                    options={(Object.keys(typeLabels) as QuestionType[]).map((t) => ({
+                      value: t,
+                      label: typeLabels[t],
+                    }))}
+                    onChange={(type) => changeType(q.key, type)}
+                  />
+                </div>
               </div>
 
               {/* Required + inline (boolean) settings */}
@@ -418,8 +420,8 @@ export function FormBuilder(): JSX.Element {
       {notice && <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">{notice}</p>}
 
       {/* Sticky action bar — white with a blue top accent border */}
-      <div className="sticky bottom-0 -mx-6 mt-8 border-t-2 border-blue-500 bg-white px-6 py-4 shadow-[0_-6px_20px_-8px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center gap-3">
+      <div className="sticky bottom-0 -mx-4 mt-8 border-t-2 border-blue-500 bg-white px-4 py-3 shadow-[0_-6px_20px_-8px_rgba(15,23,42,0.18)] sm:-mx-6 sm:px-6 sm:py-4">
+        <div className="flex flex-wrap items-center gap-3">
           <Button variant="primary" onClick={() => void save()} disabled={saving}>
             {saving ? 'Saving…' : isNew ? 'Create form' : 'Save changes'}
           </Button>
