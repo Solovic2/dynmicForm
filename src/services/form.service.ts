@@ -75,77 +75,115 @@ export function createFormWithQuestions(userId: string, input: SaveFormInput) {
 export async function replaceForm(formId: string, userId: string, input: SaveFormInput) {
   await assertOwnedForm(formId, userId);
 
-  return prisma.$transaction(async (tx) => {
-    await tx.form.update({
-      where: { id: formId },
-      data: { title: input.title, description: input.description ?? null },
-    });
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.form.update({
+        where: { id: formId },
+        data: { title: input.title, description: input.description ?? null },
+      });
 
-    // Delete questions the client removed (cascades their options + answers).
-    const keepQuestionIds = input.questions.filter((q) => q.id).map((q) => q.id!);
-    await tx.question.deleteMany({
-      where: keepQuestionIds.length
-        ? { formId, id: { notIn: keepQuestionIds } }
-        : { formId },
-    });
+      // Load existing structure WITH answer counts so we never destroy responses.
+      const existing = await tx.question.findMany({
+        where: { formId },
+        select: {
+          id: true,
+          _count: { select: { answers: true } },
+          options: { select: { id: true, _count: { select: { answers: true } } } },
+        },
+      });
+      const answeredOptionIds = new Set(
+        existing.flatMap((q) => q.options.filter((o) => o._count.answers > 0).map((o) => o.id)),
+      );
 
-    for (const [i, q] of input.questions.entries()) {
-      const isMulti = q.type === 'MULTIPLE_CHOICE';
-      if (q.id) {
-        await tx.question.update({
-          where: { id: q.id },
-          data: {
-            label: q.label,
-            type: q.type,
-            isRequired: q.isRequired,
-            settings: q.settings as Prisma.InputJsonValue,
-            position: i,
-          },
-        });
-        // Reconcile options: drop all when not multiple-choice, else upsert set.
-        if (!isMulti) {
-          await tx.questionOption.deleteMany({ where: { questionId: q.id } });
-        } else {
-          const opts = q.options ?? [];
-          const keepOptionIds = opts.filter((o) => o.id).map((o) => o.id!);
-          await tx.questionOption.deleteMany({
-            where: keepOptionIds.length
-              ? { questionId: q.id, id: { notIn: keepOptionIds } }
-              : { questionId: q.id },
+      // Guard: refuse to delete a question that already has responses.
+      const keepQuestionIds = new Set(input.questions.filter((q) => q.id).map((q) => q.id!));
+      const removed = existing.filter((q) => !keepQuestionIds.has(q.id));
+      if (removed.some((q) => q._count.answers > 0)) {
+        throw new HttpError(
+          409,
+          'Cannot delete a question that already has responses. Unpublish or keep the question.',
+        );
+      }
+      const removedIds = removed.map((q) => q.id);
+      if (removedIds.length) await tx.question.deleteMany({ where: { id: { in: removedIds } } });
+
+      for (const [i, q] of input.questions.entries()) {
+        const isMulti = q.type === 'MULTIPLE_CHOICE';
+        if (q.id) {
+          const before = existing.find((e) => e.id === q.id);
+          await tx.question.update({
+            where: { id: q.id },
+            data: {
+              label: q.label,
+              type: q.type,
+              isRequired: q.isRequired,
+              settings: q.settings as Prisma.InputJsonValue,
+              position: i,
+            },
           });
-          for (const [j, o] of opts.entries()) {
-            if (o.id) {
-              await tx.questionOption.update({
-                where: { id: o.id },
-                data: { label: o.label, position: j },
-              });
-            } else {
-              await tx.questionOption.create({
-                data: { questionId: q.id, label: o.label, position: j },
+
+          if (!isMulti) {
+            // Switching away from multiple-choice drops options — block if answered.
+            if (before?.options.some((o) => o._count.answers > 0)) {
+              throw new HttpError(
+                409,
+                `Cannot change "${q.label}" away from multiple choice because it has responses.`,
+              );
+            }
+            await tx.questionOption.deleteMany({ where: { questionId: q.id } });
+          } else {
+            const opts = q.options ?? [];
+            const keepOptionIds = new Set(opts.filter((o) => o.id).map((o) => o.id!));
+            const removedOpts = (before?.options ?? []).filter((o) => !keepOptionIds.has(o.id));
+            // Guard: refuse to delete an option that already has responses.
+            if (removedOpts.some((o) => answeredOptionIds.has(o.id))) {
+              throw new HttpError(
+                409,
+                `Cannot remove an option from "${q.label}" because it has responses.`,
+              );
+            }
+            if (removedOpts.length) {
+              await tx.questionOption.deleteMany({
+                where: { id: { in: removedOpts.map((o) => o.id) } },
               });
             }
+            for (const [j, o] of opts.entries()) {
+              if (o.id) {
+                await tx.questionOption.update({
+                  where: { id: o.id },
+                  data: { label: o.label, position: j },
+                });
+              } else {
+                await tx.questionOption.create({
+                  data: { questionId: q.id, label: o.label, position: j },
+                });
+              }
+            }
           }
+        } else {
+          await tx.question.create({
+            data: {
+              formId,
+              label: q.label,
+              type: q.type,
+              isRequired: q.isRequired,
+              settings: q.settings as Prisma.InputJsonValue,
+              position: i,
+              options:
+                isMulti && q.options
+                  ? { create: q.options.map((o, j) => ({ label: o.label, position: j })) }
+                  : undefined,
+            },
+          });
         }
-      } else {
-        await tx.question.create({
-          data: {
-            formId,
-            label: q.label,
-            type: q.type,
-            isRequired: q.isRequired,
-            settings: q.settings as Prisma.InputJsonValue,
-            position: i,
-            options:
-              isMulti && q.options
-                ? { create: q.options.map((o, j) => ({ label: o.label, position: j })) }
-                : undefined,
-          },
-        });
       }
-    }
 
-    return tx.form.findUnique({ where: { id: formId }, include: formWithQuestions });
-  });
+      return tx.form.findUnique({ where: { id: formId }, include: formWithQuestions });
+    },
+    // Interactive transaction over a remote DB (Neon) does several round-trips;
+    // give it room beyond Prisma's 5s default so large forms don't time out.
+    { timeout: 15_000, maxWait: 5_000 },
+  );
 }
 
 export async function getForm(formId: string, userId: string) {
@@ -170,6 +208,10 @@ export async function deleteForm(formId: string, userId: string): Promise<void> 
 /** Publish: set PUBLISHED and generate a portal token on first publish. */
 export async function publishForm(formId: string, userId: string) {
   const form = await assertOwnedForm(formId, userId);
+  const questionCount = await prisma.question.count({ where: { formId } });
+  if (questionCount === 0) {
+    throw new HttpError(400, 'Add at least one question before publishing.');
+  }
   return prisma.form.update({
     where: { id: formId },
     data: {
